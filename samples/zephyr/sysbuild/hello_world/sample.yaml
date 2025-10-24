@@ -21,3 +21,10 @@ tests:
       - nrf54lv10dk/nrf54lv10a/cpuapp
     extra_args:
       - hello_world_SNIPPET=nordic-flpr
+  nrf.extended.sample.sysbuild.hello_world.7120:
+    platform_allow:
+      - nrf7120dk/nrf7120dk_nrf7120_cpuapp
+    integration_platforms:
+      - nrf7120dk/nrf7120dk_nrf7120_cpuapp
+    extra_args:
+      - hello_world_SNIPPET=nordic-flpr
