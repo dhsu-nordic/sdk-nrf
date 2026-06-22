@@ -156,6 +156,12 @@ enum nrf_wifi_status umac_cmd_sys_init(struct nrf_wifi_fmac_dev_ctx *fmac_dev_ct
 
 	umac_cmd_data->max_ps_poll_fail_cnt = NRF_WIFI_MAX_PS_POLL_FAIL_CNT;
 
+	umac_cmd_data->ftm_loc_params.capabilities = NRF_WIFI_FTM_INITIATOR_ENABLE |
+						     NRF_WIFI_FTM_RESPONDER_ENABLE |
+						     NRF_WIFI_LCI_ENABLE |
+						     NRF_WIFI_CIVILOC_ENABLE |
+						     NRF_WIFI_GAS_ENABLE;
+
 	#ifdef NRF_WIFI_RX_STBC_HT
 		umac_cmd_data->stbc_enable_in_ht = 1;
 	#endif /* NRF_WIFI_RX_STBC_HT */

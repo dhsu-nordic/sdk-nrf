@@ -9,8 +9,10 @@
  */
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/sys_heap.h>
+#include <common/fmac_cmd_common.h>
 #include <common/fw_if/nrf71_wifi_ctrl.h>
 #include <common/util.h>
 #include <system/fmac_api.h>
@@ -1364,6 +1366,162 @@ static int nrf_wifi_util_mac_addr(const struct shell *sh, size_t argc, char **ar
 	return 0;
 }
 
+static void ftm_parse_uint(const char *segment, const char *key, unsigned long *value)
+{
+	const char *token = strstr(segment, key);
+
+	if (token) {
+		sscanf(token + strlen(key), "%lu", value);
+	}
+}
+
+static int nrf_wifi_util_ftm_start(const struct shell *sh, size_t argc, char **argv)
+{
+	enum nrf_wifi_status status = NRF_WIFI_STATUS_FAIL;
+	struct nrf_wifi_fmac_dev_ctx *fmac_dev_ctx = NULL;
+	struct nrf_wifi_umac_cmd_meas_start ftm_cmd;
+	char conf_buf[256] = {0};
+	char *segment = NULL;
+	char *token = NULL;
+	unsigned long value = 0;
+	size_t offset = 0;
+	unsigned int peer_index = 0;
+	int ret = 0;
+
+	memset(&ftm_cmd, 0, sizeof(ftm_cmd));
+
+	for (unsigned int i = 1; i < argc; i++) {
+		int length = snprintf(conf_buf + offset,
+				      sizeof(conf_buf) - offset,
+				      "%s%s",
+				      offset ? " " : "",
+				      argv[i]);
+
+		if ((length < 0) || ((size_t)length >= sizeof(conf_buf) - offset)) {
+			shell_error(sh, "FTM parameters too long");
+			return -ENOEXEC;
+		}
+
+		offset += length;
+	}
+
+	token = strstr(conf_buf, "num_of_peers=");
+	if (!token) {
+		shell_error(sh, "num_of_peers is mandatory");
+		shell_help(sh);
+		return -ENOEXEC;
+	}
+
+	sscanf(token + strlen("num_of_peers="), "%lu", &value);
+	ftm_cmd.info.n_peers = value;
+	if ((ftm_cmd.info.n_peers == 0) ||
+	    (ftm_cmd.info.n_peers > MAX_NUM_PEERS)) {
+		shell_error(sh, "Invalid num_of_peers %u (valid: 1 - %d)",
+			    ftm_cmd.info.n_peers, MAX_NUM_PEERS);
+		return -ENOEXEC;
+	}
+
+	segment = conf_buf;
+	for (peer_index = 0; peer_index < ftm_cmd.info.n_peers; peer_index++) {
+		struct nrf_wifi_umac_meas_request *request =
+			&ftm_cmd.info.meas_req[peer_index];
+		unsigned int mac[NRF_WIFI_ETH_ADDR_LEN];
+		char *next_segment = NULL;
+		char saved = '\0';
+
+		token = strstr(segment, "mac_addr=");
+		if (!token) {
+			shell_error(sh, "mac_addr missing for peer %u", peer_index);
+			return -ENOEXEC;
+		}
+
+		if (sscanf(token + strlen("mac_addr="),
+			   "%x:%x:%x:%x:%x:%x",
+			   &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) !=
+		    NRF_WIFI_ETH_ADDR_LEN) {
+			shell_error(sh,
+				    "Invalid mac_addr for peer %u (expected xx:xx:xx:xx:xx:xx)",
+				    peer_index);
+			return -ENOEXEC;
+		}
+
+		for (unsigned int byte = 0; byte < NRF_WIFI_ETH_ADDR_LEN; byte++) {
+			request->mac_addr[byte] = (unsigned char)mac[byte];
+		}
+
+		next_segment = strstr(token + strlen("mac_addr="), "mac_addr=");
+		if (next_segment) {
+			saved = *next_segment;
+			*next_segment = '\0';
+		}
+
+		value = 0;
+		ftm_parse_uint(token, "band=", &value);
+		request->band = (signed int)value;
+		value = 0;
+		ftm_parse_uint(token, "center_freq=", &value);
+		request->center_frequency = (unsigned int)value;
+		value = 0;
+		ftm_parse_uint(token, "preamble=", &value);
+		request->preamble = (signed int)value;
+		value = 0;
+		ftm_parse_uint(token, "burst_period=", &value);
+		request->burst_period = (unsigned char)value;
+		value = 0;
+		ftm_parse_uint(token, "ftms_per_burst=", &value);
+		request->ftms_per_burst = (unsigned char)value;
+		value = 0;
+		ftm_parse_uint(token, "ftm_params=", &value);
+		request->ftm_params = (unsigned char)value;
+		value = 0;
+		ftm_parse_uint(token, "burst_duration=", &value);
+		request->burst_duration = (unsigned char)value;
+		value = 0;
+		ftm_parse_uint(token, "num_bursts_exp=", &value);
+		request->num_bursts_exp = (unsigned char)value;
+		value = 0;
+		ftm_parse_uint(token, "min_delta_ftm=", &value);
+		request->min_delta_ftm = (unsigned char)value;
+		value = 0;
+		ftm_parse_uint(token, "tsf_timer_value=", &value);
+		request->tsf_timer_value = (unsigned short)value;
+		value = 0;
+		ftm_parse_uint(token, "tsf_timer_disable=", &value);
+		request->tsf_timer_disable = (unsigned char)value;
+
+		if (next_segment) {
+			*next_segment = saved;
+			segment = next_segment;
+		}
+	}
+
+	ftm_cmd.umac_hdr.cmd_evnt = NRF_WIFI_UMAC_CMD_MEAS_START;
+	ftm_cmd.umac_hdr.ids.wdev_id = 0;
+	ftm_cmd.umac_hdr.ids.valid_fields |= NRF_WIFI_INDEX_IDS_WDEV_ID_VALID;
+
+	k_mutex_lock(&ctx->rpu_lock, K_FOREVER);
+	if (!ctx->rpu_ctx) {
+		shell_error(sh, "RPU context not initialized");
+		ret = -ENOEXEC;
+		goto unlock;
+	}
+
+	fmac_dev_ctx = ctx->rpu_ctx;
+	status = umac_cmd_cfg(fmac_dev_ctx, &ftm_cmd, sizeof(ftm_cmd));
+	if (status != NRF_WIFI_STATUS_SUCCESS) {
+		shell_error(sh, "Failed to start FTM measurement");
+		ret = -ENOEXEC;
+		goto unlock;
+	}
+
+	shell_print(sh, "FTM measurement started for %u peer(s)",
+		    ftm_cmd.info.n_peers);
+
+unlock:
+	k_mutex_unlock(&ctx->rpu_lock);
+	return ret;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(
 	nrf71_util,
 	SHELL_CMD_ARG(he_ltf,
@@ -1442,6 +1600,12 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      nrf_wifi_util_heap,
 		      1,
 		      0),
+	SHELL_CMD_ARG(ftm_start,
+		      NULL,
+		      "Start an FTM ranging session using key=value parameters",
+		      nrf_wifi_util_ftm_start,
+		      2,
+		      20),
 #if !defined(CONFIG_NRF71_RADIO_TEST) && !defined(CONFIG_NRF71_OFFLOADED_RAW_TX)
 	SHELL_CMD_ARG(rpu_stats,
 		      NULL,

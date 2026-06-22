@@ -269,6 +269,11 @@ struct nrf_wifi_fmac_callbk_fns {
 	/** Callback function to be called when rssi is to be processed from the received frame. */
 	void (*process_rssi_from_rx)(void *os_vif_ctx,
 				     signed short signal);
+
+	/** Callback function to be called when FTM peer result is received. */
+	void (*ftm_peer_result_callbk_fn)(void *os_vif_ctx,
+					  struct nrf_wifi_umac_event_peer_meas_results *info,
+					  unsigned int event_len);
 #endif /* NRF71_STA_MODE */
 #if defined(NRF71_RAW_DATA_RX) || defined(NRF71_PROMISC_DATA_RX)
 	void (*sniffer_callbk_fn)(void *os_vif_ctx,
