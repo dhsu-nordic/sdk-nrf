@@ -1,0 +1,33 @@
+#
+# Copyright (c) 2026 Nordic Semiconductor
+#
+# SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+#
+
+if SOC_SERIES_NRF71
+
+config WIFI_NRF71_PATCH
+	bool "Embed nRF7120 Wi-Fi LMAC/UMAC ROM patches in slot0"
+	depends on !IS_BOOTLOADER_IMG
+	help
+	  Reserve linker space inside slot0 for the Wi-Fi LMAC and UMAC ROM
+	  patches, inject the patch binaries before imgtool signing, and
+	  override the SoC default WICR patch addresses with the slot0 patch
+	  addresses from the selected manifest. Without this option the Wi-Fi
+	  cores boot to bare ROM via patch_init_orig.
+
+	  Note: for TF-M NS builds the patch data is carried in the NS image
+	  binary for FOTA delivery; the actual WICR write is performed by the
+	  TF-M secure image, not the NS app.
+
+if WIFI_NRF71_PATCH
+
+config WIFI_NRF71_PATCH_VERSION
+	string "Wi-Fi patch version directory"
+	help
+	  Directory name under nrfxlib/nrf_wifi/bin/nrf7120/ holding
+	  lmac_patch.bin, umac_patch.bin and manifest.json.
+
+endif # WIFI_NRF71_PATCH
+
+endif # SOC_SERIES_NRF71
