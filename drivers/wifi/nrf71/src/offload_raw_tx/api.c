@@ -212,11 +212,7 @@ void nrf_wifi_off_raw_tx_deinit(void)
 	nrf_wifi_fmac_deinit(off_raw_tx_drv_priv.fmac_priv);
 
 	for (i = 0; i < NUM_RF_PARAM_ADDRS; i++) {
-		if (drv_ctx->phy_rf_params_addr[i]) {
-			nrf_wifi_mem_free(NRF_WIFI_MEM_POOL_TYPE_CTRL,
-					   (void *)drv_ctx->phy_rf_params_addr[i]);
-			drv_ctx->phy_rf_params_addr[i] = 0;
-		}
+		drv_ctx->phy_rf_params_addr[i] = 0;
 	}
 	/* vtf_buffer_start_address points at the static vtf_snapshots region,
 	 * not heap memory, so it must not be freed.
