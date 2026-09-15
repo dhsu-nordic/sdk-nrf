@@ -100,14 +100,7 @@ static void wifi_ipc_busyq_init(wifi_ipc_busyq_t *busyq, const ipc_device_wrappe
 	busyq->ipc_inst = ipc_inst;
 	busyq->ipc_ep_cfg.cb.bound = wifi_ipc_ep_bound;
 	busyq->recv_cb = rx_cb;
-	/* Never clear a bind that already completed: the ICMsg endpoint stays
-	 * bound for the lifetime of the Wi-Fi core, and its bound callback only
-	 * fires once. Clearing this on a re-bind would latch the endpoint as
-	 * not-ready forever and wedge every subsequent send.
-	 */
-	if (!busyq->ipc_bound) {
-		busyq->ipc_ready = false;
-	}
+	busyq->ipc_ready = false;
 	busyq->priv = priv;
 	busyq->ipc_ep_cfg.cb.received = wifi_ipc_recv_callback;
 }
@@ -118,14 +111,6 @@ static wifi_ipc_status_t wifi_ipc_busyq_register(wifi_ipc_t *context)
 	const struct device *ipc_instance = GET_IPC_INSTANCE(context->busy_q.ipc_inst);
 
 	if (context->busy_q.ipc_bound) {
-		/* Already bound, only the RX consumer was re-armed. This holds while the
-		 * Wi-Fi core stays powered; interface down/up never crosses it.
-		 *
-		 * TODO(WZN-10457): a power cycle reboots the core and resets the peer
-		 * ICMsg state, so the bind goes stale. Once power management can power
-		 * the core down, clear ipc_bound (and ipc_ready) on that leg so the next
-		 * bring-up re-opens the instance and re-runs the handshake here.
-		 */
 		LOG_DBG("IPC busy queue already registered");
 		return WIFI_IPC_STATUS_OK;
 	}
@@ -296,6 +281,25 @@ static void host_tx_reclaim_completed(void)
 	k_mutex_unlock(&host_tx_ack_lock);
 }
 
+static void host_tx_abort_pending(void)
+{
+	int i;
+
+	k_mutex_lock(&host_tx_ack_lock, K_FOREVER);
+
+	for (i = 0; i < IPC_TX_ACK_SLOTS; i++) {
+		if (host_tx_pending_bufs[i] != 0U) {
+			nrf_wifi_mem_free(NRF_WIFI_MEM_POOL_TYPE_CTRL,
+					  (void *)host_tx_pending_bufs[i]);
+		}
+
+		host_tx_pending_bufs[i] = 0U;
+		host_tx_ack_slots[i] = 0U;
+	}
+
+	k_mutex_unlock(&host_tx_ack_lock);
+}
+
 static uint32_t *host_tx_ack_slot_alloc(const void *data)
 {
 	int i;
@@ -352,9 +356,8 @@ static void host_rx_recv(const void *data, size_t len, void *priv)
 
 	LOG_DBG("Host RX IPC received");
 
-	/* The endpoint stays bound across device teardown, so events can arrive
-	 * with no consumer attached. Drop them, but always release the ring slot
-	 * or the UMAC event ring fills up and wedges the next bring-up.
+	/* An RX notification may already be pending when the consumer is detached.
+	 * Drop the event and advance the ring to avoid blocking subsequent RX.
 	 */
 	if ((callback_func == NULL) || (dev_ctx == NULL) || (dev_ctx->hal_dev_ctx == NULL)) {
 		LOG_DBG("Host RX IPC event dropped, no consumer");
@@ -390,9 +393,8 @@ int ipc_init(void)
 	wifi_ipc_host_tx_init(&wifi_host_tx, 0);
 	wifi_ipc_host_rx_init(&wifi_host_rx, 0);
 
-	/* The ack slots track buffers the UMAC may still be reading. Clearing
-	 * them on a re-init would leak every in-flight buffer, so initialize
-	 * them only once.
+	/* The acknowledgement slots track command buffers submitted to the UMAC.
+	 * Initialize them once; ipc_deinit() clears them after the peer is reset.
 	 */
 	if (!slots_initialized) {
 		for (int i = 0; i < IPC_TX_ACK_SLOTS; i++) {
@@ -408,17 +410,35 @@ int ipc_init(void)
 
 int ipc_deinit(void)
 {
-	/* Reclaim whatever the UMAC has already acknowledged. Buffers still in
-	 * flight stay owned by the ack slots and are reclaimed on a later send.
-	 */
+	int ret;
+
+	callback_func = NULL;
 	host_tx_reclaim_completed();
 
-	/* TODO(WZN-10457): this runs on interface teardown, where the core stays
-	 * powered and the IPC endpoint stays bound. When power management gains a
-	 * real core power-down, tear the endpoint down here (clear the bind latch
-	 * so the next power-up re-runs the handshake) rather than leaving it armed
-	 * against a core that has rebooted.
+	if (wifi_host_tx.busy_q.ipc_bound) {
+		ret = ipc_service_deregister_endpoint(&wifi_host_tx.busy_q.ipc_ep);
+		if (ret < 0 && ret != -ENOENT) {
+			LOG_ERR("Failed to deregister IPC endpoint: %d", ret);
+		}
+
+		ret = ipc_service_close_instance(
+			DEVICE_DT_GET(DT_NODELABEL(ipc0)));
+		if (ret < 0 && ret != -EALREADY) {
+			LOG_ERR("Failed to close IPC instance: %d", ret);
+		}
+	}
+
+	/* The peer is already reset, so no further acknowledgements can arrive.
+	 * Release all command buffers that remain in flight.
 	 */
+	host_tx_abort_pending();
+
+	wifi_host_tx.busy_q.ipc_bound = false;
+	wifi_host_tx.busy_q.ipc_ready = false;
+	wifi_host_rx.busy_q.ipc_bound = false;
+	wifi_host_rx.busy_q.ipc_ready = false;
+	wifi_ipc_rx_ctx_shared = NULL;
+
 	return 0;
 }
 
@@ -513,10 +533,6 @@ int ipc_register_rx_cb(int (*rx_handler)(void *priv), void *data)
 
 void ipc_unregister_rx_cb(void)
 {
-	/* Detach the consumer only. The endpoint stays bound for the lifetime of
-	 * the Wi-Fi core; events arriving from now on are dropped in
-	 * host_rx_recv() with their ring slot released.
-	 */
 	callback_func = NULL;
 }
 
@@ -576,10 +592,7 @@ void nrf_wifi_ipc_dev_deinit(struct nrf_wifi_ipc_dev_ctx *ipc_dev_ctx)
 {
 	ARG_UNUSED(ipc_dev_ctx);
 
-	/* Detach the event consumer before the HAL context is torn down. The IPC
-	 * endpoint itself stays bound: it is the control plane and its lifetime
-	 * follows the Wi-Fi core, not the interface.
-	 */
+	/* Detach the event consumer before the HAL context is torn down. */
 	ipc_unregister_rx_cb();
 	ipc_deinit();
 }
